@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>問題集 解答ページ</title>
+
+<style>
+:root{
+  --bg:#f5f7fa;
+  --card:#ffffff;
+  --text:#222;
+  --primary:#4f46e5;
+  --blue:#2563eb;
+  --red:#dc2626;
+  --bar-bg:#e5e7eb;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#111827;
+    --card:#1f2937;
+    --text:#f3f4f6;
+    --bar-bg:#374151;
+  }
+}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto;
+  background:var(--bg);
+  color:var(--text);
+  margin:0;
+  padding:20px;
+}
+.card{
+  background:var(--card);
+  padding:20px;
+  margin-bottom:20px;
+  border-radius:16px;
+  box-shadow:0 8px 18px rgba(0,0,0,0.08);
+}
+.file-area{
+  display:block;
+  width:100%;
+  box-sizing:border-box;
+  border-radius:14px;
+  padding:16px;
+  text-align:center;
+  cursor:pointer;
+  border:2px solid #6366f1;
+}
+.file-name{margin-top:8px;font-size:14px;opacity:.8;}
+input[type="file"]{display:none;}
+
+.select-group{display:flex;gap:10px;flex-wrap:wrap;}
+.select-card{
+  padding:10px 16px;
+  border-radius:12px;
+  cursor:pointer;
+  background:rgba(0,0,0,.05);
+  border:2px solid transparent;
+}
+.select-card.active{
+  border:2px solid var(--primary);
+  background:rgba(79,70,229,.1);
+}
+
+button{
+  padding:12px 20px;
+  border:none;
+  border-radius:12px;
+  cursor:pointer;
+  background:linear-gradient(90deg,#6366f1,#4f46e5);
+  color:white;
+  font-size:16px;
+}
+.secondary-btn{
+  background:transparent;
+  border:2px solid var(--primary);
+  color:var(--primary);
+}
+
+input[type="text"],input[type="number"]{
+  padding:10px;
+  border-radius:8px;
+  border:1px solid #ccc;
+  width:100%;
+  box-sizing:border-box;
+}
+
+.correct{color:var(--blue);font-weight:bold;}
+.wrong{color:var(--red);font-weight:bold;}
+
+.bar-container{
+  width:100%;
+  height:22px;
+  background:var(--bar-bg);
+  border-radius:12px;
+  overflow:hidden;
+  margin:10px 0 20px 0;
+}
+.bar{
+  height:100%;
+  background:linear-gradient(90deg,#22c55e,#16a34a);
+  transition:width .6s ease;
+}
+</style>
+</head>
+<body>
+
+<h1>問題集 解答ページ</h1>
+
+<div class="card" id="fileCard">
+  <label class="file-area" for="fileInput">
+    📂 問題ファイルを選択
+    <div class="file-name" id="fileName">ファイル未選択</div>
+  </label>
+  <input type="file" id="fileInput" accept=".json">
+</div>
+
+<div id="app"></div>
+
+<script>
+let originalQuiz=null, quiz=null;
+let index=0, score=0, results=[];
+let judgeMode="instant", mode="normal";
+let currentMemoryQuestion=null;
+let enterLock=false;
+let memoryCounter=0;
+const MEMORY_INTERVAL=10;
+
+const app=document.getElementById("app");
+
+/* Enter二重防止 */
+document.addEventListener("keydown",e=>{
+  if(e.key==="Enter"){
+    if(enterLock) return;
+    enterLock=true;
+    const btn=document.querySelector(".enter-active");
+    if(btn) btn.click();
+  }
+});
+document.addEventListener("keyup",e=>{
+  if(e.key==="Enter") enterLock=false;
+});
+
+/* ファイル読込 */
+document.getElementById("fileInput").addEventListener("change",e=>{
+  const file=e.target.files[0];
+  if(!file) return;
+  document.getElementById("fileName").textContent="選択中："+file.name;
+
+  const reader=new FileReader();
+  reader.onload=function(){
+    originalQuiz=JSON.parse(reader.result);
+    originalQuiz.questions.forEach(q=>{
+      if(!q.stats) q.stats={correct:0,wrong:0};
+      if(!q.memory) q.memory={done:false};
+    });
+    loadMemory();
+    loadStats();
+    showStart();
+  };
+  reader.readAsText(file);
+});
+
+/* スタート画面 */
+function showStart(){
+  index=0;score=0;results=[];memoryCounter=0;
+  document.getElementById("fileCard").style.display="block";
+
+  app.innerHTML=`
+  <div class="card">
+    <h3>出題モード</h3>
+    <div class="select-group">
+      <div class="select-card active" data-mode="normal">順番</div>
+      <div class="select-card" data-mode="random">ランダム</div>
+      <div class="select-card" data-mode="weak">苦手</div>
+      <div class="select-card" data-mode="memory">暗記</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>問題数</h3>
+    <input type="number" id="questionCount" min="1" placeholder="空欄で全問">
+  </div>
+
+  <div class="card">
+    <h3>判定方法</h3>
+    <div class="select-group">
+      <div class="select-card active" data-judge="instant">即時判定</div>
+      <div class="select-card" data-judge="final">最後にまとめて</div>
+    </div>
+  </div>
+
+  <button onclick="startQuiz()">スタート</button>
+  `;
+  setupSelect("[data-mode]");
+  setupSelect("[data-judge]");
+}
+
+function setupSelect(selector){
+  document.querySelectorAll(selector).forEach(el=>{
+    el.onclick=()=>{
+      document.querySelectorAll(selector).forEach(e=>e.classList.remove("active"));
+      el.classList.add("active");
+    };
+  });
+}
+
+/* クイズ開始 */
+function startQuiz(){
+  document.getElementById("fileCard").style.display="none";
+  judgeMode=document.querySelector("[data-judge].active").dataset.judge;
+  mode=document.querySelector("[data-mode].active").dataset.mode;
+
+  const questionLimit=parseInt(document.getElementById("questionCount").value);
+  quiz={questions:[...originalQuiz.questions]};
+
+  if(mode==="random") shuffle(quiz.questions);
+
+  if(mode==="weak"){
+    quiz.questions.sort((a,b)=>{
+      return (b.stats.wrong-b.stats.correct)-
+             (a.stats.wrong-a.stats.correct);
+    });
+  }
+
+  if(!isNaN(questionLimit)&&questionLimit>0)
+    quiz.questions=quiz.questions.slice(0,questionLimit);
+
+  showQuestion();
+}
+
+function focusInput(){
+  setTimeout(()=>{
+    const input=document.getElementById("userAnswer");
+    if(input) input.focus();
+  },50);
+}
+
+function showQuestion(){
+  if(mode==="memory"){showMemoryQuestion();return;}
+  if(index>=quiz.questions.length){showResult();return;}
+
+  const q=quiz.questions[index];
+  app.innerHTML=`
+  <div class="card">
+    <p>第 ${index+1} 問 / ${quiz.questions.length}</p>
+    <p>${q.question}</p>
+    <input type="text" id="userAnswer">
+    <br><br>
+    <button id="answerBtn" class="enter-active">解答</button>
+  </div>
+  `;
+  focusInput();
+}
+
+/* 通常チェック */
+document.addEventListener("click",e=>{
+  if(e.target&&e.target.id==="answerBtn"){
+    if(mode==="memory") checkMemoryAnswer();
+    else checkAnswer();
+  }
+});
+
+function checkAnswer(){
+  const user=document.getElementById("userAnswer").value.trim();
+  const q=quiz.questions[index];
+  const correct=q.answer.trim();
+  const isCorrect=user===correct;
+
+  if(isCorrect){score++;q.stats.correct++;}
+  else{q.stats.wrong++;}
+
+  saveStats();
+
+  results.push({question:q.question,user:user||"(未解答)",correct,isCorrect});
+
+  if(judgeMode==="instant") showInstant(isCorrect,correct);
+  else{index++;showQuestion();}
+}
+
+function showInstant(isCorrect,correct){
+  app.innerHTML=`
+  <div class="card">
+    <h3 class="${isCorrect?'correct':'wrong'}">
+      ${isCorrect?'正解！':'不正解'}
+    </h3>
+    ${!isCorrect?`<p>正解：${correct}</p>`:''}
+    <button class="enter-active" onclick="nextQuestion()">次へ</button>
+  </div>
+  `;
+}
+
+function nextQuestion(){index++;showQuestion();}
+
+function showResult(){
+  const total=quiz?.questions?.length||score;
+  const rate=total===0?0:Math.round((score/total)*100);
+
+  app.innerHTML=`
+  <div class="card">
+    <h2>リザルト</h2>
+    <h3>正解数：${score}/${total}</h3>
+    <div class="bar-container">
+      <div class="bar" style="width:${rate}%"></div>
+    </div>
+    <button onclick="showStart()">もう一度</button>
+  </div>
+  `;
+}
+
+/* 暗記モード */
+function showMemoryQuestion(){
+  const available=quiz.questions.filter(q=>!q.memory.done);
+  if(available.length===0){memoryCounter=0;showMemoryProgress();return;}
+  if(memoryCounter>=MEMORY_INTERVAL){memoryCounter=0;showMemoryProgress();return;}
+
+  const q=available[Math.floor(Math.random()*available.length)];
+  currentMemoryQuestion=q;
+  memoryCounter++;
+
+  app.innerHTML=`
+  <div class="card">
+    <p>${q.question}</p>
+    <input type="text" id="userAnswer">
+    <br><br>
+    <button id="answerBtn" class="enter-active">解答</button>
+    <button class="secondary-btn" onclick="showResult()">終了</button>
+  </div>
+  `;
+  focusInput();
+}
+
+function checkMemoryAnswer(){
+  const user=document.getElementById("userAnswer").value.trim();
+  const q=currentMemoryQuestion;
+  const correct=q.answer.trim();
+  const isCorrect=user===correct;
+
+  if(isCorrect){q.memory.done=true;score++;}
+
+  saveMemory();
+
+  app.innerHTML=`
+  <div class="card">
+    <h3 class="${isCorrect?'correct':'wrong'}">
+      ${isCorrect?'正解！':'不正解'}
+    </h3>
+    ${!isCorrect?`<p>正解：${correct}</p>`:''}
+    <button class="enter-active" onclick="showMemoryQuestion()">次へ</button>
+    <button class="secondary-btn" onclick="showResult()">終了</button>
+  </div>
+  `;
+}
+
+function showMemoryProgress(){
+  const mastered=quiz.questions.filter(q=>q.memory.done).length;
+  const percent=Math.round((mastered/quiz.questions.length)*100);
+
+  app.innerHTML=`
+  <div class="card">
+    <h2>途中リザルト</h2>
+    <p>現在の得点：${score}</p>
+    <p>完全習得：${mastered}/${quiz.questions.length}</p>
+    <div class="bar-container">
+      <div class="bar" style="width:${percent}%"></div>
+    </div>
+    <button class="enter-active" onclick="showMemoryQuestion()">続ける</button>
+    <button class="secondary-btn" onclick="showResult()">終了</button>
+  </div>
+  `;
+}
+
+/* 保存系 */
+function saveMemory(){
+  localStorage.setItem("quizMemory",
+    JSON.stringify(originalQuiz.questions.map(q=>q.memory))
+  );
+}
+function loadMemory(){
+  const saved=localStorage.getItem("quizMemory");
+  if(!saved) return;
+  const memories=JSON.parse(saved);
+  originalQuiz.questions.forEach((q,i)=>{
+    if(memories[i]) q.memory=memories[i];
+  });
+}
+function saveStats(){
+  localStorage.setItem("quizStats",
+    JSON.stringify(originalQuiz.questions.map(q=>q.stats))
+  );
+}
+function loadStats(){
+  const saved=localStorage.getItem("quizStats");
+  if(!saved) return;
+  const stats=JSON.parse(saved);
+  originalQuiz.questions.forEach((q,i)=>{
+    if(stats[i]) q.stats=stats[i];
+  });
+}
+
+/* シャッフル */
+function shuffle(arr){
+  for(let i=arr.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [arr[i],arr[j]]=[arr[j],arr[i]];
+  }
+}
+</script>
+</body>
+</html>
